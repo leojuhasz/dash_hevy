@@ -23,8 +23,10 @@ FUSO_HORAS   = -3             # Sao Paulo (UTC-3); ajuste se mudar de fuso
 # em linguagem natural. IMPORTANTE: essa camada roda AQUI (no servidor /
 # GitHub Actions), NUNCA no HTML publico -- a chave do Claude jamais vai
 # para a pagina. Por padrao fica DESLIGADA (regras puras, custo zero).
-# Para ligar: troque para True e preencha a funcao enriquecer_com_claude.
-CLAUDE_ENABLED = False
+# Para ligar: defina a variavel de ambiente CLAUDE_ENABLED=true no passo do
+# GitHub Actions (e o secret ANTHROPIC_API_KEY). Local/sem env = desligado.
+CLAUDE_ENABLED = os.environ.get('CLAUDE_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on')
+CLAUDE_MODEL   = 'claude-haiku-4-5-20251001'   # barato; troque se quiser outro
 
 # Renomeacoes de exercicios (chave = nome no Hevy, valor = nome exibido).
 # Para adicionar um novo renome, basta incluir uma linha aqui.
@@ -154,36 +156,115 @@ for d,day in df.groupby('date'):
 sessions.sort(key=lambda s:s['dateISO'])
 raw_meta={'minISO':sessions[0]['dateISO'],'maxISO':sessions[-1]['dateISO']}
 
-# ---- GANCHO: camada de justificativa "inteligente" (desligada) -----
+# ---- GANCHO: camada de justificativa "inteligente" (opcional) ------
 def enriquecer_com_claude(sessions):
-    """Quando CLAUDE_ENABLED=True, esta funcao roda no GitHub Actions
-    (chave em Secrets, NUNCA no HTML publico) e deve devolver um dict
-    {nome_exercicio: 'paragrafo amigavel'} com justificativas mais ricas
-    para os casos ambiguos. A aba usa esse texto quando existir; caso
-    contrario, cai nas regras locais (que ja explicam tudo de graca).
-
-    Esboco de implementacao futura (Haiku, ~centavos por dia):
-
-        import urllib.request
-        # 1) resuma as ultimas 3 sessoes de cada exercicio em texto curto
-        # 2) monte o corpo da requisicao:
-        body = json.dumps({
-            'model':'claude-haiku-4-5-20251001',
-            'max_tokens':1500,
-            'messages':[{'role':'user','content': PROMPT_COM_OS_DADOS}],
-        }).encode('utf-8')
-        req = urllib.request.Request(
-            'https://api.anthropic.com/v1/messages', data=body,
-            headers={'x-api-key': os.environ['ANTHROPIC_API_KEY'],
-                     'anthropic-version':'2023-06-01',
-                     'content-type':'application/json'})
-        resp = json.loads(urllib.request.urlopen(req, timeout=60).read())
-        # 3) peca ao modelo para responder em JSON e faca o parse aqui
-        return { ... }
-
-    Enquanto desligado, devolve vazio.
+    """Roda no GitHub Actions (chave em Secrets, NUNCA no HTML publico).
+    Recalcula as MESMAS decisoes do dashboard (para o texto bater com o
+    selo na tela) e pede ao Claude apenas para REESCREVER a justificativa
+    de cada exercicio num tom mais humano. Devolve {nome: paragrafo}.
+    Se qualquer coisa falhar, devolve {} e a aba usa as regras locais.
     """
-    return {}
+    import urllib.request, datetime as _dt
+    from collections import Counter
+
+    # 1) peso de trabalho (modal) + ultimas 3 sessoes por exercicio -----
+    def _ws(ex):
+        pesos = [s[0] for s in ex['s']]
+        if not pesos:
+            return None
+        best = max(Counter(pesos).items(), key=lambda kv: (kv[1], kv[0]))[0]
+        reps = [r for w, r in ex['s'] if w == best]
+        return {'weight': best, 'reps': reps}
+
+    # 2) MESMAS regras do navegador (status + motivo curto) -------------
+    def _classify(last, total):
+        n = len(last); recent = last[-1]; bw = recent['weight'] == 0
+        if total < 2 or n < 2:
+            return 'manter', 'poucos dados'
+        hits = sum(1 for s in last if s['firstReps'] >= 11)
+        w = [s['weight'] for s in last]; fr = [s['firstReps'] for s in last]
+        weight_up = w[-1] > w[-2]
+        wdrop = n >= 3 and w[-1] < w[-2] and w[-2] <= w[-3] and w[-1] < w[-3]
+        rdecl = n >= 3 and fr[0] > fr[1] > fr[2]
+        same = all(s['weight'] == recent['weight'] for s in last)
+        collapse = (not bw) and recent['firstReps'] <= 6 and recent['drop'] >= 4
+        if (not weight_up) and (wdrop or (rdecl and same) or collapse):
+            return 'reduzir', 'queda consistente'
+        if hits >= 2 and recent['firstReps'] >= 10 and recent['drop'] <= 4 and not rdecl and not wdrop:
+            return 'aumentar', 'pronto para subir'
+        if weight_up:
+            return 'manter', 'ajuste de carga recente'
+        if hits >= 2:
+            return 'manter', 'quase la - recuou na ultima'
+        if hits == 1:
+            return 'manter', 'quase la - pico isolado'
+        if recent['drop'] >= 4 and recent['firstReps'] >= 9:
+            return 'manter', 'quase la - oscilacao alta'
+        return 'manter', 'construindo reps'
+
+    por = {}
+    for s in sessions:
+        for ex in s['ex']:
+            ws = _ws(ex)
+            if not ws or not ws['reps']:
+                continue
+            d = por.setdefault(ex['n'], {'grupos': {}, 'sess': []})
+            d['grupos'][s['grupo']] = d['grupos'].get(s['grupo'], 0) + 1
+            d['sess'].append({'dateISO': s['dateISO'], 'weight': ws['weight'],
+                              'reps': ws['reps'], 'firstReps': ws['reps'][0],
+                              'drop': ws['reps'][0] - ws['reps'][-1]})
+
+    maxISO = max(s['dateISO'] for s in sessions)
+    maxd = _dt.date.fromisoformat(maxISO)
+    cand = []
+    for nome, d in por.items():
+        d['sess'].sort(key=lambda x: x['dateISO'])
+        last = d['sess'][-3:]
+        if (maxd - _dt.date.fromisoformat(last[-1]['dateISO'])).days > 35:
+            continue                                   # fora da rotina atual
+        if max(last[-1]['reps']) == 0:
+            continue                                   # cardio
+        grupo = max(d['grupos'].items(), key=lambda kv: kv[1])[0]
+        status, motivo = _classify(last, len(d['sess']))
+        hist = '; '.join('%skg %s' % (s['weight'], '-'.join(map(str, s['reps']))) for s in last)
+        cand.append((nome, grupo, status, motivo, hist))
+
+    if not cand:
+        return {}
+
+    # 3) UMA chamada com todos os exercicios ----------------------------
+    linhas = '\n'.join('- %s [%s] | decisao=%s (%s) | ultimas 3 sessoes: %s'
+                       % (n, g, st, mo, h) for (n, g, st, mo, h) in cand)
+    prompt = (
+        "Voce e um personal trainer experiente, direto e acolhedor, falando em "
+        "portugues brasileiro com Leonardo sobre o treino dele. Faixa-alvo: 10 a 12 "
+        "reps, sempre avaliando a PRIMEIRA serie (a mais descansada).\n\n"
+        "Para CADA exercicio abaixo a decisao (aumentar / manter / reduzir) JA esta "
+        "tomada por regras objetivas -- NAO mude a decisao. Escreva 1 a 2 frases curtas "
+        "explicando o porque de um jeito humano e especifico, citando os numeros reais "
+        "das ultimas sessoes. Sem jargao, sem repetir o nome do exercicio no inicio.\n\n"
+        "Exercicios:\n" + linhas + "\n\n"
+        "Responda APENAS com um objeto JSON valido, sem markdown e sem comentarios, no "
+        "formato {\"Nome exato do exercicio\": \"explicacao\", ...} usando os nomes exatos acima."
+    )
+    corpo = json.dumps({'model': CLAUDE_MODEL, 'max_tokens': 3000,
+                        'messages': [{'role': 'user', 'content': prompt}]}).encode('utf-8')
+    req = urllib.request.Request('https://api.anthropic.com/v1/messages', data=corpo,
+        headers={'x-api-key': os.environ.get('ANTHROPIC_API_KEY', ''),
+                 'anthropic-version': '2023-06-01', 'content-type': 'application/json'})
+    try:
+        resp = json.loads(urllib.request.urlopen(req, timeout=60).read().decode('utf-8'))
+        texto = ''.join(b.get('text', '') for b in resp.get('content', [])).strip()
+        if texto.startswith('```'):
+            texto = texto.split('```')[1]
+            if texto.startswith('json'):
+                texto = texto[4:]
+        dados = json.loads(texto.strip())
+        print('  Claude enriqueceu %d exercicios.' % len(dados))
+        return dados if isinstance(dados, dict) else {}
+    except Exception as e:
+        print('  (enriquecimento Claude falhou, seguindo so com as regras):', e)
+        return {}
 
 RECS_AI = enriquecer_com_claude(sessions) if CLAUDE_ENABLED else {}
 raw=json.dumps({'meta':raw_meta,'sessions':sessions,'recsAI':RECS_AI},ensure_ascii=False,separators=(',',':'))
