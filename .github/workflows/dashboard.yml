@@ -1,8 +1,8 @@
 name: Atualiza dashboard
 on:
   schedule:
-    - cron: '0 9 * * *'     # 06:00 em Brasília, todo dia
-  workflow_dispatch:         # botão pra rodar na hora
+    - cron: '0 * * * *'      # toda hora (no minuto 0), horário UTC
+  workflow_dispatch:          # botão pra rodar na hora
 permissions:
   pages: write
   id-token: write
