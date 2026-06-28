@@ -16,6 +16,16 @@ API_BASE     = 'https://api.hevyapp.com'
 PAGE_SIZE    = 10             # maximo permitido pela API para /v1/workouts
 FUSO_HORAS   = -3             # Sao Paulo (UTC-3); ajuste se mudar de fuso
 
+# --- Camada de recomendacoes (gancho opcional do Claude) ------------
+# A aba "Recomendacoes" e calculada por REGRAS deterministicas no
+# proprio navegador (gratis, sempre atualizada, funciona offline).
+# Opcionalmente, uma camada "inteligente" pode escrever as justificativas
+# em linguagem natural. IMPORTANTE: essa camada roda AQUI (no servidor /
+# GitHub Actions), NUNCA no HTML publico -- a chave do Claude jamais vai
+# para a pagina. Por padrao fica DESLIGADA (regras puras, custo zero).
+# Para ligar: troque para True e preencha a funcao enriquecer_com_claude.
+CLAUDE_ENABLED = False
+
 # Renomeacoes de exercicios (chave = nome no Hevy, valor = nome exibido).
 # Para adicionar um novo renome, basta incluir uma linha aqui.
 RENAME = {
@@ -143,7 +153,40 @@ for d,day in df.groupby('date'):
                      'treino':day['title'].iloc[0],'grupo':day['grupo'].iloc[0],'ex':ex})
 sessions.sort(key=lambda s:s['dateISO'])
 raw_meta={'minISO':sessions[0]['dateISO'],'maxISO':sessions[-1]['dateISO']}
-raw=json.dumps({'meta':raw_meta,'sessions':sessions},ensure_ascii=False,separators=(',',':'))
+
+# ---- GANCHO: camada de justificativa "inteligente" (desligada) -----
+def enriquecer_com_claude(sessions):
+    """Quando CLAUDE_ENABLED=True, esta funcao roda no GitHub Actions
+    (chave em Secrets, NUNCA no HTML publico) e deve devolver um dict
+    {nome_exercicio: 'paragrafo amigavel'} com justificativas mais ricas
+    para os casos ambiguos. A aba usa esse texto quando existir; caso
+    contrario, cai nas regras locais (que ja explicam tudo de graca).
+
+    Esboco de implementacao futura (Haiku, ~centavos por dia):
+
+        import urllib.request
+        # 1) resuma as ultimas 3 sessoes de cada exercicio em texto curto
+        # 2) monte o corpo da requisicao:
+        body = json.dumps({
+            'model':'claude-haiku-4-5-20251001',
+            'max_tokens':1500,
+            'messages':[{'role':'user','content': PROMPT_COM_OS_DADOS}],
+        }).encode('utf-8')
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages', data=body,
+            headers={'x-api-key': os.environ['ANTHROPIC_API_KEY'],
+                     'anthropic-version':'2023-06-01',
+                     'content-type':'application/json'})
+        resp = json.loads(urllib.request.urlopen(req, timeout=60).read())
+        # 3) peca ao modelo para responder em JSON e faca o parse aqui
+        return { ... }
+
+    Enquanto desligado, devolve vazio.
+    """
+    return {}
+
+RECS_AI = enriquecer_com_claude(sessions) if CLAUDE_ENABLED else {}
+raw=json.dumps({'meta':raw_meta,'sessions':sessions,'recsAI':RECS_AI},ensure_ascii=False,separators=(',',':'))
 
 # CSS (embutido)
 style = '<style>\n:root{\n  --paper:#EEF0F4; --card:#FFFFFF; --ink:#191A21; --ink2:#474A54; --muted:#878C97;\n  --line:#E3E5EB; --line2:#EDEEF2;\n  --violet:#6D49E0; --violet-d:#5634C9; --violet-soft:#ECE7FB; --violet-ghost:#F5F2FD;\n  --green:#13A368; --green-soft:#E0F3EA;\n  --amber:#E2603B; --amber-soft:#FBE9E2;\n  --display:\'Space Grotesk\',system-ui,sans-serif;\n  --body:\'Inter\',system-ui,sans-serif;\n  --mono:\'JetBrains Mono\',ui-monospace,monospace;\n  --shadow:0 1px 2px rgba(20,22,30,.04),0 6px 20px rgba(20,22,30,.06);\n  --r:16px;\n}\n*{box-sizing:border-box;margin:0;padding:0}\nhtml{scroll-behavior:smooth}\nbody{background:var(--paper);color:var(--ink);font-family:var(--body);\n  font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;\n  background-image:radial-gradient(circle at 1px 1px,rgba(25,26,33,.035) 1px,transparent 0);\n  background-size:22px 22px}\n.wrap{max-width:1180px;margin:0 auto;padding:0 20px 80px}\n\n/* header */\nheader{padding:30px 0 18px}\n.brandrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap}\n.mark{width:42px;height:42px;border-radius:12px;background:var(--ink);\n  display:grid;place-items:center;flex-shrink:0}\n.mark svg{width:24px;height:24px}\n.htitle{font-family:var(--display);font-weight:700;font-size:26px;letter-spacing:-.02em;line-height:1.05}\n.hsub{font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:3px;letter-spacing:.01em}\n.hsub b{color:var(--violet-d);font-weight:600}\n\n/* tabs */\n.tabs{display:flex;gap:6px;margin:22px 0 8px;background:var(--card);padding:5px;\n  border-radius:13px;border:1px solid var(--line);width:fit-content;box-shadow:var(--shadow)}\n.tab{font-family:var(--display);font-weight:600;font-size:14px;color:var(--ink2);\n  padding:9px 18px;border-radius:9px;cursor:pointer;border:none;background:none;\n  transition:all .18s;white-space:nowrap}\n.tab:hover{color:var(--ink);background:var(--violet-ghost)}\n.tab.on{background:var(--ink);color:#fff}\n.panel{display:none;animation:fade .35s ease}\n.panel.on{display:block}\n@keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}\n\n/* cards / layout */\n.grid{display:grid;gap:16px}\n.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}\n.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;\n  color:var(--muted);font-weight:600}\n.ctitle{font-family:var(--display);font-weight:600;font-size:16px;letter-spacing:-.01em}\n\n/* KPI */\n.kpis{grid-template-columns:repeat(4,1fr);margin-top:16px}\n.kpi{padding:18px 18px 16px;position:relative;overflow:hidden}\n.kpi .lab{font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:600}\n.kpi .val{font-family:var(--display);font-weight:700;font-size:34px;letter-spacing:-.03em;line-height:1;margin-top:12px}\n.kpi .unit{font-size:14px;color:var(--muted);font-weight:500;margin-left:3px}\n.kpi .foot{font-size:12px;color:var(--ink2);margin-top:6px}\n.kpi::after{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--violet)}\n.kpi.k2::after{background:var(--green)}\n.kpi.k3::after{background:var(--ink)}\n.kpi.k4::after{background:var(--amber)}\n\n/* overview rows */\n.two{grid-template-columns:1.35fr 1fr;margin-top:16px;align-items:stretch}\n.pad{padding:20px}\n.chead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;gap:10px}\n.note{font-size:12px;color:var(--muted)}\n\n/* heatmap */\n.hm{display:flex;gap:5px;margin-top:16px;overflow-x:auto;padding-bottom:4px}\n.hmweek{display:flex;flex-direction:column;gap:5px}\n.hmcell{width:26px;height:26px;border-radius:7px;background:var(--line2);position:relative;cursor:default}\n.hmcell.has{cursor:pointer}\n.hmcell .tip,.dot .tip,.bar .tip{position:absolute;bottom:130%;left:50%;transform:translateX(-50%);\n  background:var(--ink);color:#fff;font-family:var(--mono);font-size:11px;padding:6px 9px;border-radius:7px;\n  white-space:nowrap;opacity:0;pointer-events:none;transition:.15s;z-index:5;box-shadow:var(--shadow)}\n.hmcell.has:hover .tip{opacity:1}\n.hmlegend{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:14px}\n.hmlegend i{width:16px;height:16px;border-radius:5px;display:inline-block}\n.hmrows{display:flex;flex-direction:column;gap:5px;margin-right:3px}\n.hmrows span{height:26px;display:flex;align-items:center;font-family:var(--mono);font-size:10px;color:var(--muted)}\n\n/* highlights */\n.hl{padding:16px 20px;border-bottom:1px solid var(--line2);display:flex;align-items:center;gap:14px}\n.hl:last-child{border-bottom:none}\n.hl .rk{font-family:var(--display);font-weight:700;font-size:13px;color:var(--muted);width:18px}\n.hl .nm{flex:1;font-weight:500;font-size:14px}\n.hl .gp{font-family:var(--mono);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}\n.delta{font-family:var(--display);font-weight:700;font-size:15px;font-variant-numeric:tabular-nums}\n.delta.up{color:var(--green)} .delta.dn{color:var(--amber)} .delta.flat{color:var(--muted)}\n.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:11px;\n  padding:3px 8px;border-radius:20px;font-weight:600}\n.pill.up{background:var(--green-soft);color:var(--green)}\n.pill.dn{background:var(--amber-soft);color:var(--amber)}\n.pill.flat{background:var(--line2);color:var(--muted)}\n\n/* evolution explorer */\n.exp{grid-template-columns:300px 1fr;margin-top:16px;align-items:start}\n.exlist{padding:8px;max-height:560px;overflow-y:auto}\n.grphead{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.06em;\n  text-transform:uppercase;color:var(--violet-d);padding:14px 12px 7px}\n.exitem{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:10px;cursor:pointer;transition:.14s}\n.exitem:hover{background:var(--violet-ghost)}\n.exitem.on{background:var(--ink)}\n.exitem.on .exn{color:#fff} .exitem.on .exg{color:#b9bdc9}\n.exn{flex:1;font-size:13.5px;font-weight:500;line-height:1.25}\n.exg{font-family:var(--mono);font-size:10px;color:var(--muted)}\n.minidelta{font-family:var(--display);font-weight:700;font-size:12px;font-variant-numeric:tabular-nums;flex-shrink:0}\n\n.detail{padding:24px}\n.dhead{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}\n.dname{font-family:var(--display);font-weight:700;font-size:22px;letter-spacing:-.02em}\n.dgrp{font-family:var(--mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:3px}\n.statrow{display:flex;gap:26px;margin:20px 0 6px;flex-wrap:wrap}\n.stat .sl{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}\n.stat .sv{font-family:var(--display);font-weight:700;font-size:20px;margin-top:3px;font-variant-numeric:tabular-nums}\n.chartbox{margin-top:8px}\n.svgchart{width:100%;height:auto;display:block;overflow:visible}\n.dot{cursor:pointer}\n.empty{padding:60px 20px;text-align:center;color:var(--muted)}\n\n/* sessions */\n.filters{display:flex;gap:8px;margin:16px 0;flex-wrap:wrap}\n.chip{font-family:var(--mono);font-size:12px;font-weight:600;padding:7px 14px;border-radius:20px;\n  border:1px solid var(--line);background:var(--card);color:var(--ink2);cursor:pointer;transition:.15s}\n.chip:hover{border-color:var(--violet)}\n.chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}\n.sess{margin-bottom:10px;overflow:hidden}\n.sesshead{display:grid;grid-template-columns:auto 1fr auto auto;gap:16px;align-items:center;\n  padding:16px 20px;cursor:pointer}\n.sdate{font-family:var(--display);font-weight:700;font-size:15px;min-width:96px}\n.sdate small{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);font-weight:500;text-transform:uppercase}\n.streino{font-weight:600;font-size:14.5px}\n.streino .tag{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:600;\n  padding:2px 8px;border-radius:6px;background:var(--violet-soft);color:var(--violet-d);margin-left:8px;\n  text-transform:uppercase;letter-spacing:.03em;vertical-align:middle}\n.smeta{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right}\n.smeta b{color:var(--ink);font-weight:600}\n.chev{transition:.2s;color:var(--muted)}\n.sess.open .chev{transform:rotate(180deg)}\n.sbody{display:none;border-top:1px solid var(--line2);padding:6px 20px 14px}\n.sess.open .sbody{display:block}\n.exrow{padding:11px 0;border-bottom:1px solid var(--line2)}\n.exrow:last-child{border-bottom:none}\n.exrow .ex-top{display:flex;justify-content:space-between;align-items:baseline;gap:12px}\n.exrow .ex-nm{font-weight:500;font-size:14px}\n.exrow .ex-tw{font-family:var(--mono);font-size:12px;color:var(--violet-d);font-weight:600}\n.setline{font-family:var(--mono);font-size:12px;color:var(--ink2);margin-top:6px;display:flex;flex-wrap:wrap;gap:6px}\n.setbadge{background:var(--paper);border:1px solid var(--line);padding:2px 8px;border-radius:6px}\n\nfooter{margin-top:30px;text-align:center;font-family:var(--mono);font-size:11px;color:var(--muted)}\n\n@media(max-width:880px){\n  .kpis{grid-template-columns:repeat(2,1fr)}\n  .two,.exp{grid-template-columns:1fr}\n  .exlist{max-height:none}\n  .sesshead{grid-template-columns:auto 1fr auto}\n  .smeta{display:none}\n}\n</style>'
@@ -179,6 +222,53 @@ EXTRA_CSS = """
 </style>
 """
 
+REC_CSS = """
+<style>
+:root{--red:#D23B3B;--red-soft:#FBE4E4}
+.recnote{font-size:12.5px;color:var(--ink2);background:var(--violet-ghost);border:1px solid var(--violet-soft);
+  border-radius:11px;padding:12px 14px;margin:16px 0 4px;line-height:1.55}
+.recnote b{color:var(--violet-d)}
+.recsum{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 2px}
+.recsum .pillc{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:12px;font-weight:600;
+  padding:7px 12px;border-radius:11px;border:1px solid var(--line);background:var(--card);box-shadow:var(--shadow)}
+.recsum .dotc{width:9px;height:9px;border-radius:50%}
+.recgrp{font-family:var(--display);font-weight:700;font-size:13px;letter-spacing:.04em;text-transform:uppercase;
+  margin:24px 4px 10px;display:flex;align-items:center;gap:10px}
+.recgrp .gln{flex:1;height:1px;background:var(--line)}
+.rec{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);
+  margin-bottom:9px;overflow:hidden;border-left:4px solid var(--muted)}
+.rec.s-aumentar{border-left-color:var(--green)}
+.rec.s-manter{border-left-color:var(--violet)}
+.rec.s-reduzir{border-left-color:var(--red)}
+.rechead{display:grid;grid-template-columns:104px 1fr auto;gap:14px;align-items:center;padding:14px 16px}
+.recbadge{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;
+  padding:7px 8px;border-radius:8px;text-align:center;display:flex;align-items:center;justify-content:center;gap:5px}
+.b-aumentar{background:var(--green-soft);color:var(--green)}
+.b-manter{background:var(--violet-soft);color:var(--violet-d)}
+.b-reduzir{background:var(--red-soft);color:var(--red)}
+.recnm{font-weight:600;font-size:14.5px;line-height:1.25;min-width:0}
+.recnm .recwhytag{font-family:var(--mono);font-size:11px;color:var(--muted);font-weight:500;margin-top:3px;display:block}
+.recmove{font-family:var(--mono);font-size:12px;color:var(--ink2);text-align:right;white-space:nowrap;font-weight:600}
+.recmove b{color:var(--ink);font-size:14px}
+.recmove .ai{color:var(--violet);font-size:11px;margin-left:3px}
+details.recwhy{border-top:1px solid var(--line2)}
+details.recwhy summary{list-style:none;cursor:pointer;font-family:var(--mono);font-size:11.5px;font-weight:600;
+  color:var(--violet-d);padding:10px 16px;display:flex;align-items:center;gap:7px;user-select:none}
+details.recwhy summary::-webkit-details-marker{display:none}
+details.recwhy summary .chv{transition:.2s;display:inline-flex}
+details.recwhy[open] summary .chv{transform:rotate(180deg)}
+details.recwhy summary:hover{background:var(--violet-ghost)}
+.recbody{padding:2px 16px 16px;font-size:13.5px;line-height:1.6;color:var(--ink2)}
+.recbody .sug{margin-top:10px;padding:11px 13px;background:var(--paper);border:1px solid var(--line);border-radius:10px;font-size:13px}
+.recbody .sug b{color:var(--ink);font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;display:block;margin-bottom:4px}
+.recbody .hist{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.recbody .hist b{color:var(--ink2);font-weight:600;text-transform:none;letter-spacing:0}
+.recbody .hist span{background:var(--paper);border:1px solid var(--line);padding:2px 8px;border-radius:6px}
+@media(max-width:880px){.rechead{grid-template-columns:96px 1fr;grid-row-gap:9px}
+  .recmove{grid-column:1 / -1;text-align:left}}
+</style>
+"""
+
 BODY = """
 <div class="wrap">
 <header>
@@ -206,6 +296,7 @@ BODY = """
     <button class="tab on" data-tab="overview">Vis&atilde;o geral</button>
     <button class="tab" data-tab="evolucao">Evolu&ccedil;&atilde;o</button>
     <button class="tab" data-tab="sessoes">Sess&otilde;es</button>
+    <button class="tab" data-tab="recs">Recomenda&ccedil;&otilde;es</button>
   </div>
 </header>
 
@@ -249,6 +340,12 @@ BODY = """
 <section class="panel" id="sessoes">
   <div class="filters" id="filters"></div>
   <div id="sesslist"></div>
+</section>
+
+<section class="panel" id="recs">
+  <div class="recnote" id="recnote"></div>
+  <div class="filters" id="recfilters"></div>
+  <div id="reclist"></div>
 </section>
 
 <footer>Gerado a partir da API do Hevy &middot; ajuste o intervalo no topo &middot; clique nos exerc&iacute;cios e nas sess&otilde;es</footer>
@@ -543,6 +640,169 @@ function renderSessions(sv){
   box.querySelectorAll('.sess .sesshead').forEach(h=>h.onclick=()=>h.parentElement.classList.toggle('open'));
 }
 
+/* ---------- recomendacoes ---------- */
+const kgfmt=v=>(Math.round(v*10)/10).toString().replace('.',',');
+const recStatusOrder={aumentar:0,reduzir:1,manter:2};
+const recReasonRank={'Pronto para subir':0,'Queda consistente':0,'Ajuste de carga recente':1,
+  'Quase l&aacute; &mdash; recuou na &uacute;ltima':2,'Quase l&aacute; &mdash; pico isolado':2,
+  'Quase l&aacute; &mdash; oscila&ccedil;&atilde;o alta':2};
+
+/* peso de trabalho = peso mais frequente da sessao (ignora aquecimento/teste) */
+function workingSet(e){
+  const order={};e.s.forEach(p=>{const w=p[0];(order[w]=order[w]||[]).push(p[1]);});
+  let bestW=null,bestC=-1;
+  Object.keys(order).forEach(wk=>{const w=+wk,c=order[wk].length;
+    if(c>bestC||(c===bestC&&w>bestW)){bestC=c;bestW=w;}});
+  const reps=e.s.filter(p=>p[0]===bestW).map(p=>p[1]);
+  return {weight:bestW,reps};
+}
+
+function classifyRec(last,all){
+  const n=last.length,recent=last[n-1],TOP=11,bw=recent.bodyweight;
+  const w=last.map(s=>s.weight),fr=last.map(s=>s.firstReps);
+  const tgt=(()=>{let t=Math.round((recent.weight*0.95)/2.5)*2.5;if(t>=recent.weight)t=recent.weight-2.5;return t;})();
+  if(all.length<2||n<2)
+    return {status:'manter',reason:'Poucos dados',
+      detail:'S&oacute; '+all.length+' sess&atilde;o(&otilde;es) desse exerc&iacute;cio na rotina recente. Preciso de pelo menos 2 para avaliar a tend&ecirc;ncia com seguran&ccedil;a.',
+      sug:'Mantenha a carga e registre mais algumas sess&otilde;es.',
+      move: bw?'manter':'manter '+kgfmt(recent.weight)+' kg'};
+
+  const hits=last.filter(s=>s.firstReps>=TOP).length;
+  const weightUp=w[n-1]>w[n-2];
+  const weightDropPersistent=(n>=3)&&(w[n-1]<w[n-2]&&w[n-2]<=w[n-3]&&w[n-1]<w[n-3]);
+  const repsDeclinePersistent=(n>=3)&&(fr[0]>fr[1]&&fr[1]>fr[2]);
+  const sameWeight=last.every(s=>s.weight===recent.weight);
+  const formCollapse=(!bw)&&recent.firstReps<=6&&recent.drop>=4;
+  const avg=(fr.reduce((a,b)=>a+b,0)/n).toFixed(1).replace('.',',');
+
+  /* REDUZIR */
+  if(!weightUp&&(weightDropPersistent||(repsDeclinePersistent&&sameWeight)||formCollapse)){
+    let why;
+    if(weightDropPersistent) why='A carga vem caindo em sess&otilde;es seguidas ('+w.map(kgfmt).join('&rarr;')+' kg) &mdash; isso &eacute; uma tend&ecirc;ncia consistente, n&atilde;o um dia ruim isolado.';
+    else if(repsDeclinePersistent) why='As reps da 1&ordf; s&eacute;rie ca&iacute;ram sess&atilde;o ap&oacute;s sess&atilde;o no mesmo peso ('+fr.join('&rarr;')+'). Sinal de fadiga acumulada, n&atilde;o de progresso.';
+    else why='A 1&ordf; s&eacute;rie j&aacute; sai baixa ('+recent.firstReps+' reps) e despenca dentro da sess&atilde;o. A execu&ccedil;&atilde;o est&aacute; colapsando cedo.';
+    return {status:'reduzir',reason:'Queda consistente',
+      detail:why+' Recuar um pouco por 1&ndash;2 semanas costuma destravar e te devolver &agrave; faixa de 10&ndash;12.',
+      sug: bw?'Reduza o volume (menos reps-alvo) ou aumente o descanso entre s&eacute;ries.'
+            :'Reduza para ~'+kgfmt(tgt)+' kg e reconstrua at&eacute; voltar a 11+ na 1&ordf; s&eacute;rie.',
+      move: bw?'reduzir':kgfmt(recent.weight)+' &rarr; <b>'+kgfmt(tgt)+'</b> kg'};
+  }
+
+  /* AUMENTAR -- com trava de recencia: a ultima sessao tem que continuar forte (>=10) */
+  const controlledDrop=recent.drop<=4,noDecline=!repsDeclinePersistent&&!weightDropPersistent;
+  if(hits>=2&&recent.firstReps>=10&&controlledDrop&&noDecline)
+    return {status:'aumentar',reason:'Pronto para subir',
+      detail:'Sua 1&ordf; s&eacute;rie bateu 11+ reps em '+hits+' das &uacute;ltimas '+n+' sess&otilde;es ('+fr.join(', ')+') e a &uacute;ltima continua firme, com a queda dentro da sess&atilde;o sob controle. Voc&ecirc; domou esse peso de forma consistente &mdash; n&atilde;o foi sorte de um dia.',
+      sug: bw?'Aumente a dificuldade (mais reps-alvo ou progress&atilde;o do movimento).'
+            :'Suba para '+kgfmt(recent.weight+2.5)+' kg no pr&oacute;ximo treino. &Eacute; normal a 1&ordf; s&eacute;rie cair para ~9&ndash;10 reps no peso novo; em 2&ndash;3 sess&otilde;es voc&ecirc; recupera.',
+      move: bw?'subir dificuldade':kgfmt(recent.weight)+' &rarr; <b>'+kgfmt(recent.weight+2.5)+'</b> kg'};
+
+  const moveManter = bw?'manter':'manter '+kgfmt(recent.weight)+' kg';
+
+  /* ajuste de carga recente */
+  if(weightUp)
+    return {status:'manter',reason:'Ajuste de carga recente',
+      detail:'Voc&ecirc; subiu a carga h&aacute; pouco ('+w.map(kgfmt).join('&rarr;')+' kg), ent&atilde;o &eacute; esperado as reps recuarem agora. N&atilde;o &eacute; problema &mdash; &eacute; o come&ccedil;o do novo ciclo.',
+      sug:'Fique em '+kgfmt(recent.weight)+' kg e foque em recuperar as repeti&ccedil;&otilde;es at&eacute; 11+ na 1&ordf; s&eacute;rie.',move:moveManter};
+  /* bateu o topo 2x mas a ultima recuou */
+  if(hits>=2)
+    return {status:'manter',reason:'Quase l&aacute; &mdash; recuou na &uacute;ltima',
+      detail:'Voc&ecirc; bateu 11+ na 1&ordf; s&eacute;rie em sess&otilde;es recentes, mas a &uacute;ltima recuou ('+fr.join(', ')+'). Quero ver a 1&ordf; s&eacute;rie forte de novo antes de subir &mdash; assim a progress&atilde;o n&atilde;o vira recuo na semana seguinte.',
+      sug:'Mantenha '+kgfmt(recent.weight)+' kg e repita um bom desempenho na 1&ordf; s&eacute;rie mais uma vez.',move:moveManter};
+  /* pico isolado */
+  if(hits===1)
+    return {status:'manter',reason:'Quase l&aacute; &mdash; pico isolado',
+      detail:'Voc&ecirc; chegou a 11+ na 1&ordf; s&eacute;rie em s&oacute; 1 das &uacute;ltimas '+n+' sess&otilde;es ('+fr.join(', ')+') &mdash; foi um pico isolado. Para subir com seguran&ccedil;a, o ideal &eacute; repetir isso em 2 de 3 sess&otilde;es.',
+      sug:'Mantenha '+kgfmt(recent.weight)+' kg e busque repetir o bom desempenho.',move:moveManter};
+  /* oscilacao alta dentro da sessao */
+  if(recent.drop>=4&&recent.firstReps>=9)
+    return {status:'manter',reason:'Quase l&aacute; &mdash; oscila&ccedil;&atilde;o alta',
+      detail:'A 1&ordf; s&eacute;rie vai bem ('+recent.firstReps+'), mas dentro da mesma sess&atilde;o cai bastante ('+recent.reps.join('&rarr;')+'). Essa oscila&ccedil;&atilde;o mostra que o peso ainda n&atilde;o est&aacute; domado.',
+      sug:'Mantenha '+kgfmt(recent.weight)+' kg at&eacute; a queda dentro da sess&atilde;o diminuir; a&iacute; sobe.',move:moveManter};
+  /* construindo reps */
+  return {status:'manter',reason:'Construindo repeti&ccedil;&otilde;es',
+    detail:'A m&eacute;dia da 1&ordf; s&eacute;rie est&aacute; em ~'+avg+' reps, ainda abaixo da faixa de subida (11+ na 1&ordf; s&eacute;rie). Sem queda preocupante &mdash; &eacute; s&oacute; seguir ganhando repeti&ccedil;&atilde;o.',
+    sug: bw?'Continue e foque em ganhar repeti&ccedil;&otilde;es.':'Mantenha '+kgfmt(recent.weight)+' kg e mire chegar a 11 reps na 1&ordf; s&eacute;rie.',move:moveManter};
+}
+
+function computeRecs(){
+  const map={};
+  RAW.sessions.forEach(s=>s.ex.forEach(e=>{
+    const ws=workingSet(e);if(!ws.reps.length)return;
+    const fr=ws.reps[0],lr=ws.reps[ws.reps.length-1];
+    (map[e.n]=map[e.n]||{nome:e.n,grupos:{},sess:[]});
+    map[e.n].grupos[s.grupo]=(map[e.n].grupos[s.grupo]||0)+1;
+    map[e.n].sess.push({dateISO:s.dateISO,weight:ws.weight,reps:ws.reps,
+      firstReps:fr,lastReps:lr,drop:fr-lr,bodyweight:ws.weight===0});
+  }));
+  const maxISO=RAW.meta.maxISO;
+  return Object.values(map).map(m=>{
+    m.sess.sort((a,b)=>a.dateISO<b.dateISO?-1:1);
+    const grupo=Object.keys(m.grupos).sort((a,b)=>m.grupos[b]-m.grupos[a])[0];
+    const last=m.sess.slice(-3);
+    const r=classifyRec(last,m.sess);
+    return {nome:m.nome,grupo,gordem:(grpOrder[grupo]!=null?grpOrder[grupo]:9),
+      last,nSess:m.sess.length,...r};
+  }).filter(r=>{
+    const lISO=r.last[r.last.length-1].dateISO;
+    if((parseISO(maxISO)-parseISO(lISO))/864e5>35) return false;      // fora da rotina atual
+    if(Math.max.apply(null,r.last[r.last.length-1].reps)===0) return false; // cardio
+    return true;
+  }).sort((a,b)=>a.gordem-b.gordem
+    ||recStatusOrder[a.status]-recStatusOrder[b.status]
+    ||(recReasonRank[a.reason]!=null?recReasonRank[a.reason]:3)-(recReasonRank[b.reason]!=null?recReasonRank[b.reason]:3)
+    ||a.nome.localeCompare(b.nome));
+}
+
+function renderRecsTab(){
+  if(!STATE.recGrupo)STATE.recGrupo='Todos';
+  const all=computeRecs();
+  const AI=RAW.recsAI||{};
+  const cnt={aumentar:0,manter:0,reduzir:0};all.forEach(r=>cnt[r.status]++);
+  document.getElementById('recnote').innerHTML=
+    'Baseado nas <b>3 sess&otilde;es mais recentes</b> de cada exerc&iacute;cio da sua rotina atual (n&atilde;o muda com o filtro de datas do topo). '+
+    'Faixa-alvo <b>10&ndash;12 reps</b>: o crit&eacute;rio olha a <b>1&ordf; s&eacute;rie</b> (a mais descansada). Toque em "Por qu&ecirc;?" para ver o racioc&iacute;nio.';
+
+  const present=[...new Set(all.map(r=>r.grupo))];
+  const chips=['Todos'].concat(['Pernas','Empurrar','Puxar','Outros'].filter(g=>present.includes(g)));
+  if(chips.indexOf(STATE.recGrupo)<0)STATE.recGrupo='Todos';
+  document.getElementById('recfilters').innerHTML=chips.map(g=>
+    `<button class="chip ${g===STATE.recGrupo?'on':''}" data-g="${g}">${g}</button>`).join('');
+  document.querySelectorAll('#recfilters .chip').forEach(c=>c.onclick=()=>{STATE.recGrupo=c.dataset.g;renderRecsTab();});
+
+  const view=all.filter(r=>STATE.recGrupo==='Todos'||r.grupo===STATE.recGrupo);
+  const box=document.getElementById('reclist');
+  if(!view.length){box.innerHTML='<div class="card"><div class="empty-lg"><b>Sem recomenda&ccedil;&otilde;es</b>Nenhum exerc&iacute;cio deste grupo na rotina recente.</div></div>';return;}
+
+  const label={aumentar:'&#9650; Aumentar',manter:'&#9644; Manter',reduzir:'&#9660; Reduzir'};
+  const groups={};view.forEach(r=>{(groups[r.grupo]=groups[r.grupo]||[]).push(r);});
+  let html='';
+  ['Pernas','Empurrar','Puxar','Outros'].filter(g=>groups[g]).forEach(g=>{
+    html+=`<div class="recgrp" style="color:${grpColor[g]}">${g}<span class="gln" style="background:${grpColor[g]};opacity:.18"></span></div>`;
+    groups[g].forEach(r=>{
+      const ai=AI[r.nome];
+      const hist=r.last.map(s=>`<span>${s.weight>0?kgfmt(s.weight)+'kg ':''}${s.reps.join('-')}</span>`).join('');
+      const detailHTML=ai
+        ?`<p>${ai} <span style="color:var(--violet)">&#10024;</span></p>`
+        :`<p>${r.detail}</p>`;
+      html+=`<div class="rec s-${r.status}">
+        <div class="rechead">
+          <span class="recbadge b-${r.status}">${label[r.status]}</span>
+          <div class="recnm">${r.nome}<span class="recwhytag">${r.reason}</span></div>
+          <div class="recmove">${r.move}${ai?'<span class="ai">&#10024;</span>':''}</div>
+        </div>
+        <details class="recwhy"><summary>Por qu&ecirc;?
+          <svg class="chv" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></summary>
+          <div class="recbody">${detailHTML}
+            <div class="sug"><b>Sugest&atilde;o</b>${r.sug}</div>
+            <div class="hist"><b>&Uacute;ltimas:</b>${hist}</div>
+          </div></details>
+      </div>`;
+    });
+  });
+  box.innerHTML=html;
+}
+
 /* ---------- range control ---------- */
 function setActivePreset(){
   document.querySelectorAll('.preset').forEach(b=>{
@@ -578,6 +838,7 @@ function onDateChange(){
 /* init: abre de 14/05 ate o dia atual */
 STATE.start=clamp('2026-05-14');STATE.end=HI;
 render();
+renderRecsTab();
 </script>
 """
 
@@ -593,6 +854,6 @@ head = """<!DOCTYPE html>
 """
 
 JS = JS.replace('__RAWJSON__', raw).replace('2026-05-14', DATA_INICIO)
-html = head + style + EXTRA_CSS + "</head>\n<body>\n" + BODY + JS + "\n</body>\n</html>"
+html = head + style + EXTRA_CSS + REC_CSS + "</head>\n<body>\n" + BODY + JS + "\n</body>\n</html>"
 open(SAIDA,'w',encoding='utf-8').write(html)
 print('OK ->', SAIDA, '|', round(len(html)/1024,1),'KB |', len(sessions),'sessoes |', raw_meta['minISO'],'a',raw_meta['maxISO'])
