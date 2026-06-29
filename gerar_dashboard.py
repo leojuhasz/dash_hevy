@@ -374,10 +374,10 @@ BODY = """
     </div>
   </div>
   <div class="tabs" role="tablist">
-    <button class="tab on" data-tab="overview">Geral</button>
+    <button class="tab on" data-tab="overview">Vis&atilde;o</button>
     <button class="tab" data-tab="evolucao">Evolu&ccedil;&atilde;o</button>
     <button class="tab" data-tab="sessoes">Sess&otilde;es</button>
-    <button class="tab" data-tab="recs">Recomenda&ccedil;&otilde;es</button>
+    <button class="tab" data-tab="recs">Insights</button>
   </div>
 </header>
 
